@@ -862,9 +862,9 @@ public class BetterBaritoneBuild extends Module {
 
                         int sleep;
                         if (initial) {
-                            sleep = 50;
+                            sleep = 300;
                             initial = false;
-                        } else sleep = 70;
+                        } else sleep = 200;
                         try {
                             Thread.sleep(sleep);
                         } catch (InterruptedException e) {
