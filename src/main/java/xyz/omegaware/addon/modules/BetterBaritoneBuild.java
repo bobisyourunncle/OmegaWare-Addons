@@ -97,11 +97,10 @@ class EventRegistry {
         return new ArrayList<>(eventQueue);
     }
 
-    public Event next() {
-        if (eventQueue.isEmpty()) return null;
-        Event event = eventQueue.getFirst();
-        remove(event);
-        return event;
+public Event next() {
+    if (eventQueue.isEmpty()) return null;
+    return eventQueue.remove(0);
+}
     }
 
     public boolean eventExists(Event.EventType type) {
@@ -135,6 +134,26 @@ class StorageRegistry {
             return false;
         }
     } private final List<Storage> storages = new ArrayList<>();
+
+    private final Setting<Integer> chestOpenDelay = sgGeneral.add(
+    new IntSetting.Builder()
+        .name("chest-open-delay-ms")
+        .description("Delay after opening a chest before collecting items.")
+        .defaultValue(150)
+        .min(0)
+        .sliderRange(0, 2000)
+        .build()
+);
+
+private final Setting<Integer> itemTransferDelay = sgGeneral.add(
+    new IntSetting.Builder()
+        .name("item-transfer-delay-ms")
+        .description("Delay between each item transfer.")
+        .defaultValue(50)
+        .min(0)
+        .sliderRange(0, 500)
+        .build()
+);
 
     public void clear() {
         storages.clear();
@@ -540,6 +559,11 @@ public class BetterBaritoneBuild extends Module {
     private static EventRegistry.Event currentEvent = null;
     private BlockPos lastBlockInteractPos = null;
 
+    private boolean waitingForChestDelay = false;
+    private long chestOpenTimestamp = 0;
+    private long lastItemTransferTimestamp = 0;
+    private int currentTransferSlot = 0;
+
     @Override
     public void onActivate() {
         if (!BaritoneUtils.IS_AVAILABLE) {
@@ -779,9 +803,87 @@ public class BetterBaritoneBuild extends Module {
                 return;
             }
 
-            FetchRegistry.INSTANCE.add(new FetchRegistry.Material(item, stacks + extraStacks.get()));
-            EventRegistry.INSTANCE.push(new EventRegistry.Event(EventRegistry.Event.EventType.FetchItems, true, () -> StorageRegistry.INSTANCE.findItemAndPath(item)));
-            return;
+// Detect chest open and start delay
+if (!waitingForChestDelay) {
+    chestOpenTimestamp = System.currentTimeMillis();
+    waitingForChestDelay = true;
+    currentTransferSlot = 0;
+    return;
+}
+
+// Wait for chest open delay
+if (waitingForChestDelay) {
+    long elapsed = System.currentTimeMillis() - chestOpenTimestamp;
+
+    if (elapsed < chestOpenDelay.get()) {
+        return;
+    }
+
+    waitingForChestDelay = false;
+    lastItemTransferTimestamp = System.currentTimeMillis();
+}
+
+// Safe snapshot
+List<FetchRegistry.Material> materials = new ArrayList<>(FetchRegistry.INSTANCE.get());
+if (materials.isEmpty()) return;
+
+ScreenHandler handler = mc.player.currentScreenHandler;
+if (handler == null) return;
+
+int max = 27;
+if (handler.getType() == ScreenHandlerType.GENERIC_9X6)
+    max = 54;
+
+// Process ONE slot per delay interval
+long now = System.currentTimeMillis();
+if (now - lastItemTransferTimestamp < itemTransferDelay.get()) return;
+
+lastItemTransferTimestamp = now;
+
+for (FetchRegistry.Material material : materials) {
+
+    if (material.item == null || material.stacks <= 0) continue;
+
+    int requiredItems = material.stacks * 64;
+
+    for (int i = currentTransferSlot; i < max; i++) {
+
+        if (!handler.getSlot(i).hasStack()) continue;
+
+        ItemStack stack = handler.getSlot(i).getStack();
+        if (stack.getItem() != material.item) continue;
+
+        int stackCount = stack.getCount();
+
+        InvUtils.shiftClick().slotId(i);
+
+        int remainingItems = requiredItems - stackCount;
+        int remainingStacks = remainingItems > 0
+                ? (int) Math.ceil(remainingItems / 64.0)
+                : 0;
+
+        FetchRegistry.INSTANCE.updateMaterial(material, remainingStacks);
+
+        currentTransferSlot = i + 1;
+        return; // Only one transfer per delay
+    }
+}
+
+// If we reach here, no more matching items
+FetchRegistry.INSTANCE.update();
+
+if (FetchRegistry.INSTANCE.isEmpty()) {
+
+    mc.player.closeHandledScreen();
+
+    baritone.getPathingBehavior().cancelEverything();
+
+    EventRegistry.INSTANCE.push(new EventRegistry.Event(
+        EventRegistry.Event.EventType.Resume,
+        false,
+        () -> baritone.getCommandManager().execute(buildCommand)
+    ));
+}
         }
 
         if (msg.contains("done building")) {
